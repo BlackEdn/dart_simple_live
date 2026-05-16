@@ -44,6 +44,15 @@ jobs:
           cd simple_live_app
           flutter pub get
 
+      # 创建空的签名配置，防止 build.gradle.kts 读取空值报错
+      - name: Create dummy Android key.properties
+        run: |
+          echo "storeFile=dummy.jks" > simple_live_app/android/key.properties
+          echo "storePassword=debug" >> simple_live_app/android/key.properties
+          echo "keyPassword=debug" >> simple_live_app/android/key.properties
+          echo "keyAlias=debug" >> simple_live_app/android/key.properties
+          touch simple_live_app/android/dummy.jks
+
       # 安装appdmg npm install -g appdmg
       - name: Install appdmg
         run: npm install -g appdmg
