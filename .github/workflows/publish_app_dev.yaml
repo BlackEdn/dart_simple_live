@@ -7,7 +7,7 @@ on:
       - "dev_v*"
 
 jobs:
-  build-android-apk-only:
+  build-android-apk:
     runs-on: ubuntu-latest
 
     permissions:
@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+        with:
+          ref: dev
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -30,57 +32,66 @@ jobs:
           flutter-version: "3.38.x"
           cache: true
 
+      - name: Prepare Android signing placeholders
+        run: |
+          keytool -genkeypair -v \
+            -keystore simple_live_app/android/dummy.jks \
+            -storepass dummy123 \
+            -keypass dummy123 \
+            -alias dummy \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Debug,O=Debug,C=US"
+
+          cat > simple_live_app/android/key.properties <<'EOF'
+          storeFile=dummy.jks
+          storePassword=dummy123
+          keyPassword=dummy123
+          keyAlias=dummy
+          EOF
+
+      - name: Patch Kotlin compatibility
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          # New Flutter/dependencies may pull Kotlin stdlib 2.3.x, so use Kotlin Gradle plugin 2.3.21.
+          for p in [
+              Path("simple_live_app/android/settings.gradle"),
+              Path("simple_live_app/android/settings.gradle.kts"),
+          ]:
+              if p.exists():
+                  s = p.read_text(encoding="utf-8")
+                  s = re.sub(
+                      r'id\("org\.jetbrains\.kotlin\.android"\)\s+version\s+"[^"]+"',
+                      'id("org.jetbrains.kotlin.android") version "2.3.21"',
+                      s,
+                  )
+                  p.write_text(s, encoding="utf-8")
+
+          # Kotlin 2.3 no longer accepts the old kotlinOptions { jvmTarget = "..." } form.
+          app_gradle = Path("simple_live_app/android/app/build.gradle.kts")
+          if app_gradle.exists():
+              s = app_gradle.read_text(encoding="utf-8")
+              s = re.sub(
+                  r'\n\s*kotlinOptions\s*\{\s*jvmTarget\s*=\s*[^\n]+\n\s*\}',
+                  "\n",
+                  s,
+                  flags=re.S,
+              )
+              if "org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11" not in s:
+                  s += '''\n\nkotlin {\n    compilerOptions {\n        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)\n    }\n}\n'''
+              app_gradle.write_text(s, encoding="utf-8")
+          PY
+
       - name: Restore packages
         run: |
           cd simple_live_app
           flutter pub get
 
-      - name: Patch Android build settings
-        run: |
-          # 1) 给项目一个假的 key.properties，避免 build.gradle.kts 读取签名配置时拿到空值
-          cat > simple_live_app/android/key.properties <<'EOF'
-          storeFile=dummy.jks
-          storePassword=dummy
-          keyPassword=dummy
-          keyAlias=dummy
-          EOF
-
-          # 2) 修复 Kotlin 版本不匹配：日志里 kotlin-stdlib 是 2.3.21，但项目 Kotlin Gradle plugin 期望 2.1.0
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          targets = [
-              Path('simple_live_app/android/settings.gradle'),
-              Path('simple_live_app/android/settings.gradle.kts'),
-              Path('simple_live_app/android/build.gradle'),
-              Path('simple_live_app/android/build.gradle.kts'),
-          ]
-
-          changed = False
-          for p in targets:
-              if not p.exists():
-                  continue
-              s = p.read_text(encoding='utf-8')
-              old = s
-              s = re.sub(r'id\("org\.jetbrains\.kotlin\.android"\)\s+version\s+"[^"]+"',
-                         'id("org.jetbrains.kotlin.android") version "2.3.21"', s)
-              s = re.sub(r"id\('org\.jetbrains\.kotlin\.android'\)\s+version\s+'[^']+'",
-                         "id('org.jetbrains.kotlin.android') version '2.3.21'", s)
-              s = re.sub(r'ext\.kotlin_version\s*=\s*"[^"]+"',
-                         'ext.kotlin_version = "2.3.21"', s)
-              s = re.sub(r"ext\.kotlin_version\s*=\s*'[^']+'",
-                         "ext.kotlin_version = '2.3.21'", s)
-              if s != old:
-                  p.write_text(s, encoding='utf-8')
-                  print(f'Patched Kotlin version in {p}')
-                  changed = True
-
-          if not changed:
-              print('No Kotlin plugin version line was found to patch. Continue build anyway.')
-          PY
-
-      - name: Build APK only
+      - name: Build debug APK
         run: |
           cd simple_live_app
           flutter build apk --debug
